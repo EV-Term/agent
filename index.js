@@ -19,6 +19,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  acceptHandshake,
+  fingerprint,
+  generateIdentity,
+  opener,
+  sealer,
+} from './session-crypto.js';
+
 const CONFIG_DIR = path.join(os.homedir(), '.evterm');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'agent.json');
 const DEFAULT_SERVER = 'https://app.evterm.com';
@@ -151,6 +159,10 @@ function run(cfg, { code } = {}) {
 
   ws.addEventListener('open', () => {
     backoff = 1000;
+    // The server is told the public half so it can hand it to a browser that
+    // has not met this machine before. It can lie about it, which is exactly
+    // what the fingerprint check in the car is for.
+    send({ t: 'hello', publicKey: cfg.publicKey });
     console.log(`connected to ${cfg.server} as "${cfg.label}"`);
     if (!code) console.log('waiting for the car. ctrl-c to stop.');
   });
@@ -188,10 +200,23 @@ function run(cfg, { code } = {}) {
       process.exit(1);
     }
 
-    if (msg.t === 'open') handleOpen(msg, send);
-    else if (msg.t === 'data') {
+    if (msg.t === 'open') {
+      handleOpen(msg, send, cfg).catch((err) =>
+        send({ t: 'status', sid: msg.sid, s: 'error', msg: err.message, final: true })
+      );
+    } else if (msg.t === 'data') {
       const s = sessions.get(msg.sid);
-      if (s) s.child.stdin.write(Buffer.from(msg.d, 'base64'));
+      if (!s) return;
+      // A frame that will not open is not written to the shell. Decryption
+      // failing means the bytes are not the car's, and the only safe thing to
+      // do with input of unknown origin is drop the session.
+      s.open(msg.d).then(
+        (plain) => s.child.stdin.write(plain),
+        () => {
+          send({ t: 'status', sid: msg.sid, s: 'error', msg: 'bad frame', final: true });
+          s.child.kill();
+        }
+      );
     } else if (msg.t === 'resize') {
       const s = sessions.get(msg.sid);
       if (s) resizeSession(s, clamp(msg.cols, 20, 500), clamp(msg.rows, 5, 200));
@@ -219,9 +244,21 @@ function run(cfg, { code } = {}) {
 
 const clamp = (n, lo, hi) => Math.min(Math.max(Number(n) || lo, lo), hi);
 
-function handleOpen(msg, send) {
+async function handleOpen(msg, send, cfg) {
   const sid = msg.sid;
   if (sessions.has(sid)) return;
+
+  // No plaintext path. A session that cannot be encrypted does not open, rather
+  // than falling back to something the server could read.
+  if (!msg.kx) throw new Error('this machine only accepts encrypted sessions; update the car');
+  const { ephemeralPublic, keys } = await acceptHandshake(
+    cfg.privateKey,
+    cfg.publicKey,
+    msg.kx,
+    sid
+  );
+  const seal = sealer(keys, 'toBrowser');
+  const unseal = opener(keys, 'toAgent');
 
   const name = safeName(msg.tmuxSession, 'evterm');
   const cols = clamp(msg.cols, 20, 500);
@@ -234,7 +271,7 @@ function handleOpen(msg, send) {
     send({ t: 'status', sid, s: 'error', msg: err.message, final: true });
     return;
   }
-  sessions.set(sid, { child, name });
+  sessions.set(sid, { child, name, open: unseal });
 
   // Coalesce before sending. A shell streams in many tiny writes, and one frame
   // per write is mostly framing overhead over a car's mobile connection.
@@ -243,9 +280,17 @@ function handleOpen(msg, send) {
   const flush = () => {
     flushTimer = null;
     if (!pending.length) return;
-    send({ t: 'data', sid, d: Buffer.concat(pending).toString('base64') });
+    const chunk = Buffer.concat(pending);
     pending = [];
+    // Sealing is async and the counter inside the sealer is what orders these,
+    // so the chain keeps writes in the order they were produced rather than the
+    // order their promises happen to settle.
+    sealing = sealing
+      .then(() => seal(chunk))
+      .then((d) => send({ t: 'data', sid, d }))
+      .catch(() => {});
   };
+  let sealing = Promise.resolve();
   const onOut = (chunk) => {
     pending.push(chunk);
     if (!flushTimer) flushTimer = setTimeout(flush, 10);
@@ -267,7 +312,7 @@ function handleOpen(msg, send) {
     send({ t: 'status', sid, s: 'closed', msg: 'session ended', final: true });
   });
 
-  send({ t: 'status', sid, s: 'ready', msg: os.hostname() });
+  send({ t: 'status', sid, s: 'ready', msg: os.hostname(), kx: ephemeralPublic });
 }
 
 /* --- cli ----------------------------------------------------------------- */
@@ -286,10 +331,18 @@ if (command === 'link') {
     process.exit(1);
   }
   const existing = readConfig();
+  // The key pair is this machine's identity to the car, and it is made here
+  // rather than by the server precisely so the server never holds the private
+  // half.
+  const identity = await generateIdentity();
+  console.log(`fingerprint  ${await fingerprint(identity.publicKey)}`);
+  console.log('the car shows this the first time it connects. they must match.\n');
   run(
     {
       server: flag('server', (existing && existing.server) || DEFAULT_SERVER),
       label: flag('name', os.hostname()),
+      publicKey: identity.publicKey,
+      privateKey: identity.privateKey,
     },
     { code: code.toUpperCase() }
   );
@@ -307,11 +360,18 @@ if (command === 'link') {
     process.exit(1);
   }
   console.log(`linked to ${cfg.server} as "${cfg.label}" (id ${cfg.id})`);
+  if (cfg.publicKey) console.log(`fingerprint  ${await fingerprint(cfg.publicKey)}`);
+  else console.log('no key pair: linked by an older version. run `evterm link` again.');
 } else {
   const cfg = readConfig();
   if (!cfg || !cfg.token) {
     console.error('not linked yet. open EV Term in the car, tap Add machine, then run:');
     console.error('  evterm link <CODE>');
+    process.exit(1);
+  }
+  if (!cfg.privateKey) {
+    console.error('this machine was linked before sessions were encrypted.');
+    console.error('run `evterm link <CODE>` again to generate a key pair.');
     process.exit(1);
   }
   run(cfg);

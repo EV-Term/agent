@@ -3,9 +3,23 @@
   "version": "0.1.0",
   "description": "Connects a machine you own to EV Term in your car. Outbound only, no dependencies.",
   "type": "module",
-  "bin": { "evterm": "index.js" },
-  "engines": { "node": ">=22" },
-  "files": ["index.js", "terminal.py", "README.md"],
+  "bin": {
+    "evterm": "index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "index.js",
+    "terminal.py",
+    "README.md"
+  ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/EV-Term/agent.git" }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EV-Term/agent.git"
+  },
+  "scripts": {
+    "test": "node test/session-crypto.test.js"
+  }
 }

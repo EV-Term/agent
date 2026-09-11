@@ -62,6 +62,25 @@ Worth knowing:
   can be linked again.
 - The session is whatever your shell can do. There is no sandbox here.
 
-**Today the server can see the stream.** End-to-end encryption between the car
-and this agent is not implemented yet. Run it against a server you control until
-it is.
+## Encryption
+
+Sessions are encrypted between the car and this machine. The server relays
+frames it cannot read.
+
+The key pair is generated here, at `evterm link`, and the private half never
+leaves. The car pins the public half the first time it connects, the way SSH
+pins a host key. That pinning is what makes the server relaying the key safe:
+a server that substituted its own would produce a different fingerprint.
+
+```
+evterm status
+```
+
+prints the fingerprint. The car shows the same four groups on first connect, and
+they have to match. If they do not, something is sitting in the middle.
+
+Two honest limits. The first connection is trust on first use, so a server that
+lied at exactly that moment would not be caught unless you compare the
+fingerprint. And this covers sessions on machines that dial in; a host reached
+over SSH is a different thing, because there the server is the SSH client and no
+amount of browser-side crypto changes that.
