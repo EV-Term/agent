@@ -1,13 +1,13 @@
 {
   "name": "evterm",
   "version": "0.1.0",
-  "description": "Connects a machine you own to EV Term in your car. Outbound only, no dependencies.",
+  "description": "Connects a machine you own to EV Term in your car. Outbound only.",
   "type": "module",
   "bin": {
     "evterm": "index.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=20"
   },
   "files": [
     "index.js",
@@ -23,5 +23,8 @@
   },
   "scripts": {
     "test": "node test/session-crypto.test.js"
+  },
+  "optionalDependencies": {
+    "ws": "^8.18.0"
   }
 }

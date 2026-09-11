@@ -5,19 +5,30 @@
  * car can reach a shell on this machine. Nothing listens here, no port is
  * forwarded, and the connection is one you started and can end.
  *
- * No dependencies, on purpose. This is a program that gives a remote screen a
+ * No dependencies on Node 22+. This is a program that gives a remote screen a
  * shell on your laptop; it should be short enough that you can read all of it
  * before running it. That rules out a native pty module, so the pty comes from
  * tools already on the machine — Python's stdlib pty, or script(1) — and tmux
  * keeps the session alive across the disconnections a moving car guarantees.
  *
- * Requires Node 22+ for the built-in WebSocket client.
+ * Requires Node 22+ for the built-in WebSocket client. On Node 20 the `ws`
+ * package is used instead, when it is installed alongside.
  */
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+/* Node 22 has a WebSocket client built in; Node 20 does not. The `ws` package
+ * speaks the same event API, so it is a drop-in when present — it ships as an
+ * optional dependency, and Node 22+ never loads it. */
+const WebSocket =
+  globalThis.WebSocket ?? (await import('ws').catch(() => null))?.default;
+if (!WebSocket) {
+  console.error('This Node has no built-in WebSocket (needs Node 22+) and `ws` is not installed.');
+  process.exit(1);
+}
 
 import { install, serviceStatus, uninstall } from './service.js';
 import {
