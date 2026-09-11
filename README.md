@@ -40,8 +40,29 @@ than it sounds: a car drops its connection constantly.
 | --- | --- |
 | `evterm link <CODE>` | Pair with an account. Writes `~/.evterm/agent.json`, mode 600. |
 | `evterm` | Stay connected. This is the one you leave running. |
-| `evterm status` | What it is linked to. |
+| `evterm install` | Keep it running: a launchd agent on macOS, a systemd user service on Linux. |
+| `evterm status` | What it is linked to, and whether the service is loaded. |
+| `evterm uninstall` | Stop and remove that service. Stays linked. |
 | `evterm unlink` | Delete the credentials here. |
+
+### Keeping it running
+
+`evterm` in a terminal stops when you close the lid or the window. `evterm install`
+hands the job to the operating system instead:
+
+```sh
+evterm link 7K4QPS
+evterm install
+```
+
+It copies the agent to `~/.evterm/agent` first, because the usual way in is
+`npx github:EV-Term/agent` and npm is free to delete its cache at any time. After
+that, launchd or systemd starts it at login and restarts it if it dies. Logs go to
+`~/.evterm/agent.log` on macOS and to `journalctl --user -u evterm` on Linux.
+
+On a headless Linux box, check `loginctl show-user $USER -p Linger` says `yes`, or
+the service stops when you log out. `evterm install` turns lingering on when it can
+and tells you the sudo command when it cannot.
 
 `--server https://...` points it at a different EV Term, and `--name "Studio Mac"`
 sets how it appears in the car. Both are remembered after the first link.

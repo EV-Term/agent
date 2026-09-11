@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { install, serviceStatus, uninstall } from './service.js';
 import {
   acceptHandshake,
   fingerprint,
@@ -353,6 +354,21 @@ if (command === 'link') {
   } catch {
     console.log('nothing to unlink.');
   }
+} else if (command === 'install') {
+  const cfg = readConfig();
+  if (!cfg || !cfg.token) {
+    console.error('link this machine first, then install:');
+    console.error('  evterm link <CODE>');
+    process.exit(1);
+  }
+  try {
+    for (const line of install()) console.log(line);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+} else if (command === 'uninstall') {
+  for (const line of uninstall()) console.log(line);
 } else if (command === 'status') {
   const cfg = readConfig();
   if (!cfg) {
@@ -362,6 +378,7 @@ if (command === 'link') {
   console.log(`linked to ${cfg.server} as "${cfg.label}" (id ${cfg.id})`);
   if (cfg.publicKey) console.log(`fingerprint  ${await fingerprint(cfg.publicKey)}`);
   else console.log('no key pair: linked by an older version. run `evterm link` again.');
+  console.log(serviceStatus());
 } else {
   const cfg = readConfig();
   if (!cfg || !cfg.token) {
@@ -373,6 +390,10 @@ if (command === 'link') {
     console.error('this machine was linked before sessions were encrypted.');
     console.error('run `evterm link <CODE>` again to generate a key pair.');
     process.exit(1);
+  }
+  if (serviceStatus().includes('loaded') || serviceStatus().includes('active')) {
+    console.log('note: a background service is already running this agent.');
+    console.log('      two copies on one machine will take turns; stop one.\n');
   }
   run(cfg);
 }

@@ -11,6 +11,8 @@
   },
   "files": [
     "index.js",
+    "service.js",
+    "session-crypto.js",
     "terminal.py",
     "README.md"
   ],

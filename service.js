@@ -1,0 +1,238 @@
+/* Keeping the agent running.
+ *
+ * Without this the product forgets your machine every time you close a laptop
+ * lid, and step 2 of the setup has to be done again. So `evterm install` hands
+ * the job to whatever the operating system already uses for background work:
+ * launchd on macOS, systemd --user on Linux. No new daemon of our own, nothing
+ * to keep updated, and `launchctl`/`systemctl` remain the way to inspect it.
+ *
+ * The agent is copied into ~/.evterm/agent first. The usual way in is
+ * `npx github:EV-Term/agent`, which runs out of a cache directory npm is free
+ * to delete; a service pointed at that path works until it silently does not.
+ * A copy under the user's own directory is the only path that stays true.
+ */
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const HOME = os.homedir();
+const CONFIG_DIR = path.join(HOME, '.evterm');
+const INSTALL_DIR = path.join(CONFIG_DIR, 'agent');
+const ENTRY = path.join(INSTALL_DIR, 'index.js');
+const LOG = path.join(CONFIG_DIR, 'agent.log');
+
+const LABEL = 'com.evterm.agent';
+const PLIST = path.join(HOME, 'Library', 'LaunchAgents', `${LABEL}.plist`);
+const UNIT_DIR = path.join(HOME, '.config', 'systemd', 'user');
+const UNIT = path.join(UNIT_DIR, 'evterm.service');
+
+// launchd and systemd both start with a PATH that has nothing in it a
+// developer would recognise, and this agent shells out to tmux and python3.
+// Homebrew on both architectures, then the system directories.
+const PATH_ENV = [
+  '/opt/homebrew/bin',
+  '/usr/local/bin',
+  path.join(HOME, '.local', 'bin'),
+  '/usr/bin',
+  '/bin',
+  '/usr/sbin',
+  '/sbin',
+].join(':');
+
+const run = (cmd, args) => execFileSync(cmd, args, { stdio: 'pipe' }).toString().trim();
+
+// Quietly, because "already loaded" and "not loaded" are both fine outcomes
+// depending on which way we are going.
+function tryRun(cmd, args) {
+  try {
+    run(cmd, args);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* process.execPath is whatever ran this command, and on Homebrew that is a
+ * versioned Cellar path: /opt/homebrew/Cellar/node/25.9.0_2/bin/node. A service
+ * pinned to it keeps working until the next `brew upgrade node` deletes that
+ * directory, and then fails at boot, months later, for no visible reason. So
+ * prefer a stable path that resolves to a new enough node. */
+function resolveNode() {
+  const candidates = [
+    '/opt/homebrew/bin/node',
+    '/usr/local/bin/node',
+    path.join(HOME, '.local', 'bin', 'node'),
+    '/usr/bin/node',
+  ];
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) continue;
+    try {
+      const major = Number(run(candidate, ['--version']).replace(/^v/, '').split('.')[0]);
+      if (major >= 22) return candidate;
+    } catch {
+      /* not runnable, try the next one */
+    }
+  }
+  // nvm, asdf, volta and friends live at versioned paths too, but theirs stay
+  // put until the user removes that version deliberately.
+  return process.execPath;
+}
+
+function copyAgent() {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  if (path.resolve(here) === path.resolve(INSTALL_DIR)) return; // already installed from here
+  fs.mkdirSync(INSTALL_DIR, { recursive: true, mode: 0o700 });
+  for (const file of ['index.js', 'session-crypto.js', 'service.js', 'terminal.py']) {
+    const from = path.join(here, file);
+    if (fs.existsSync(from)) fs.copyFileSync(from, path.join(INSTALL_DIR, file));
+  }
+}
+
+const xml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function installLaunchd() {
+  fs.mkdirSync(path.dirname(PLIST), { recursive: true });
+  fs.writeFileSync(
+    PLIST,
+    `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${xml(resolveNode())}</string>
+    <string>${xml(ENTRY)}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>${xml(PATH_ENV)}</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>WorkingDirectory</key><string>${xml(HOME)}</string>
+  <key>StandardOutPath</key><string>${xml(LOG)}</string>
+  <key>StandardErrorPath</key><string>${xml(LOG)}</string>
+</dict>
+</plist>
+`,
+    { mode: 0o644 }
+  );
+
+  const target = `gui/${process.getuid()}`;
+  tryRun('launchctl', ['bootout', `${target}/${LABEL}`]);
+  // bootstrap is the supported verb since 10.11; load -w is the fallback for
+  // anything older, and for the odd machine where bootstrap refuses a session
+  // it does not consider a GUI one.
+  if (!tryRun('launchctl', ['bootstrap', target, PLIST])) {
+    run('launchctl', ['load', '-w', PLIST]);
+  }
+
+  return [
+    'installed as a launchd agent. it starts at login and restarts if it dies.',
+    '',
+    `  logs      tail -f ${LOG}`,
+    `  stop      launchctl bootout ${target}/${LABEL}`,
+    '  remove    evterm uninstall',
+  ];
+}
+
+function installSystemd() {
+  fs.mkdirSync(UNIT_DIR, { recursive: true });
+  fs.writeFileSync(
+    UNIT,
+    `[Unit]
+Description=EV Term agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=${resolveNode()} ${ENTRY}
+Environment=PATH=${PATH_ENV}
+WorkingDirectory=${HOME}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`,
+    { mode: 0o644 }
+  );
+
+  run('systemctl', ['--user', 'daemon-reload']);
+  run('systemctl', ['--user', 'enable', '--now', 'evterm.service']);
+
+  const out = [
+    'installed as a systemd user service. it starts at boot and restarts if it dies.',
+    '',
+    '  logs      journalctl --user -u evterm -f',
+    '  stop      systemctl --user stop evterm',
+    '  remove    evterm uninstall',
+  ];
+
+  // Without lingering, a user service stops when the last login session ends,
+  // which on a headless box means it dies the moment you close the SSH you
+  // installed it from. Worth saying out loud when it cannot be turned on.
+  if (!tryRun('loginctl', ['enable-linger', os.userInfo().username])) {
+    out.push(
+      '',
+      'note: could not enable lingering, so this stops when you log out. fix with:',
+      `  sudo loginctl enable-linger ${os.userInfo().username}`
+    );
+  }
+
+  return out;
+}
+
+export function install() {
+  copyAgent();
+  if (process.platform === 'darwin') return installLaunchd();
+  if (process.platform === 'linux') return installSystemd();
+  throw new Error(
+    `no service installer for ${process.platform}. run \`evterm\` under your own supervisor instead.`
+  );
+}
+
+export function uninstall() {
+  const done = [];
+  if (process.platform === 'darwin') {
+    tryRun('launchctl', ['bootout', `gui/${process.getuid()}/${LABEL}`]) ||
+      tryRun('launchctl', ['unload', '-w', PLIST]);
+    if (fs.existsSync(PLIST)) {
+      fs.rmSync(PLIST);
+      done.push(`removed ${PLIST}`);
+    }
+  } else if (process.platform === 'linux') {
+    tryRun('systemctl', ['--user', 'disable', '--now', 'evterm.service']);
+    if (fs.existsSync(UNIT)) {
+      fs.rmSync(UNIT);
+      done.push(`removed ${UNIT}`);
+    }
+    tryRun('systemctl', ['--user', 'daemon-reload']);
+  }
+  // The copy stays: uninstall stops the service, it does not unlink the
+  // machine. `evterm unlink` is the one that takes the credentials away.
+  return done.length ? done : ['no service was installed.'];
+}
+
+export function serviceStatus() {
+  if (process.platform === 'darwin') {
+    if (!fs.existsSync(PLIST)) return 'service: not installed';
+    const out = tryRun('launchctl', ['print', `gui/${process.getuid()}/${LABEL}`]);
+    return out ? 'service: installed and loaded (launchd)' : 'service: installed but not loaded';
+  }
+  if (process.platform === 'linux') {
+    if (!fs.existsSync(UNIT)) return 'service: not installed';
+    let state = '';
+    try {
+      state = run('systemctl', ['--user', 'is-active', 'evterm.service']);
+    } catch (err) {
+      state = (err.stdout || '').toString().trim() || 'inactive';
+    }
+    return `service: installed (systemd, ${state})`;
+  }
+  return 'service: not supported on this platform';
+}
