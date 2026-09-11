@@ -13,10 +13,11 @@
  *
  * Requires Node 22+ for the built-in WebSocket client.
  */
-import { spawn, execFile, execFileSync } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const CONFIG_DIR = path.join(os.homedir(), '.evterm');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'agent.json');
@@ -66,18 +67,22 @@ function buildCommand(name, startCommand) {
 
 // A pty without a native module, from whatever the machine already has.
 //
-// Python's stdlib is preferred because it works when our own stdin is a pipe,
-// which it always is here — we are a daemon, not a terminal. BSD script(1)
-// calls tcgetattr on its own stdin and dies with "Operation not supported on
-// socket" in exactly that situation, so it is the fallback rather than the
-// first choice, for machines without python3.
+// Python leads because it is the only one of the two that can be told how big
+// the terminal is. BSD script(1) additionally calls tcgetattr on its own stdin,
+// and a daemon's stdin is a pipe, so it dies with "Operation not supported on
+// socket" before doing anything - it is here for machines with no python3,
+// where a fixed 80x24 shell beats no shell.
+const PTY_HELPER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'terminal.py');
+
 const PTY_RUNNERS = [
   {
     cmd: 'python3',
-    args: (command) => ['-c', 'import pty,sys; pty.spawn(["/bin/sh","-c",sys.argv[1]])', command],
+    sizeable: true,
+    args: (command, cols, rows) => [PTY_HELPER, command, String(cols), String(rows)],
   },
   {
     cmd: 'script',
+    sizeable: false,
     args: (command) =>
       process.platform === 'darwin'
         ? ['-q', '/dev/null', 'sh', '-c', command]
@@ -87,35 +92,41 @@ const PTY_RUNNERS = [
 
 function haveCommand(cmd) {
   try {
-    execFileSync('command', ['-v', cmd], { shell: '/bin/sh', stdio: 'ignore' });
+    // Run the shell directly rather than passing shell:true, which concatenates
+    // arguments instead of escaping them and warns about it on every start.
+    execFileSync('/bin/sh', ['-c', `command -v ${cmd}`], { stdio: 'ignore' });
     return true;
   } catch {
     return false;
   }
 }
 
-function spawnPty(command) {
+function spawnPty(command, cols, rows) {
   const runner = PTY_RUNNERS.find((r) => haveCommand(r.cmd));
   if (!runner) {
     const err = new Error('no way to open a terminal: install python3, or util-linux for script(1)');
     err.code = 'ENOPTY';
     throw err;
   }
-  return spawn(runner.cmd, runner.args(command), {
+  const child = spawn(runner.cmd, runner.args(command, cols, rows), {
     env: { ...process.env, TERM: 'xterm-256color' },
-    stdio: ['pipe', 'pipe', 'pipe'],
+    // The fourth stream is where later sizes go. Sending them down stdin would
+    // put them in the terminal stream, where they are just characters the shell
+    // would type out.
+    stdio: runner.sizeable ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
   });
+  child.sizeable = runner.sizeable;
+  return child;
 }
 
-// script(1) offers no way to set the pty window size, and our own stdout is not
-// a terminal to inherit one from, so tmux is what actually resizes here.
-function resizeSession(name, cols, rows) {
-  execFile('tmux', ['list-clients', '-t', name, '-F', '#{client_tty}'], (err, stdout) => {
-    if (err) return;
-    for (const tty of stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
-      execFile('tmux', ['refresh-client', '-t', tty, '-C', `${cols}x${rows}`], () => {});
-    }
-  });
+// Resizing the pty is the whole of it: tmux sizes its window to the client, and
+// the client is this pty. Going through tmux instead does not work - its
+// `refresh-client -C` applies only to control mode clients and answers "not a
+// control client" for a normal attach.
+function resizeSession(session, cols, rows) {
+  if (!session.child.sizeable) return;
+  const control = session.child.stdio[3];
+  if (control && control.writable) control.write(`${cols}x${rows}\n`);
 }
 
 /* --- the connection ------------------------------------------------------ */
@@ -183,7 +194,7 @@ function run(cfg, { code } = {}) {
       if (s) s.child.stdin.write(Buffer.from(msg.d, 'base64'));
     } else if (msg.t === 'resize') {
       const s = sessions.get(msg.sid);
-      if (s) resizeSession(s.name, clamp(msg.cols, 20, 500), clamp(msg.rows, 5, 200));
+      if (s) resizeSession(s, clamp(msg.cols, 20, 500), clamp(msg.rows, 5, 200));
     } else if (msg.t === 'close') {
       const s = sessions.get(msg.sid);
       // Detaching, not killing: the work in tmux outlives the car losing signal.
@@ -213,9 +224,11 @@ function handleOpen(msg, send) {
   if (sessions.has(sid)) return;
 
   const name = safeName(msg.tmuxSession, 'evterm');
+  const cols = clamp(msg.cols, 20, 500);
+  const rows = clamp(msg.rows, 5, 200);
   let child;
   try {
-    child = spawnPty(buildCommand(name, msg.startCommand));
+    child = spawnPty(buildCommand(name, msg.startCommand), cols, rows);
   } catch (err) {
     // Final: no amount of retrying finds a pty that is not installed.
     send({ t: 'status', sid, s: 'error', msg: err.message, final: true });
@@ -255,7 +268,6 @@ function handleOpen(msg, send) {
   });
 
   send({ t: 'status', sid, s: 'ready', msg: os.hostname() });
-  resizeSession(name, clamp(msg.cols, 20, 500), clamp(msg.rows, 5, 200));
 }
 
 /* --- cli ----------------------------------------------------------------- */

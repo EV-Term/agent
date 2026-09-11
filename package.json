@@ -5,7 +5,7 @@
   "type": "module",
   "bin": { "evterm": "index.js" },
   "engines": { "node": ">=22" },
-  "files": ["index.js", "README.md"],
+  "files": ["index.js", "terminal.py", "README.md"],
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/EV-Term/agent.git" }
 }
