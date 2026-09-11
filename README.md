@@ -28,10 +28,11 @@ than it sounds: a car drops its connection constantly.
   has no dependencies.
 - **tmux** — `brew install tmux`, `apt install tmux`. Without it you still get a
   shell, but it dies with the connection.
-- **python3 or `script`** — one of them, for the terminal itself. Both are
-  usually already there. Node cannot open a pty on its own and a native module
-  would mean a compiler on your machine, which is a worse trade than using a
-  tool you already have.
+- **python3** — for the terminal itself. Node cannot open a pty on its own, and
+  a native module would mean a compiler on your machine, which is a worse trade
+  than using something already installed. `script(1)` stands in when python3 is
+  missing, but it cannot be told how big your screen is, so the terminal stays
+  at 80x24.
 
 ## Commands
 
