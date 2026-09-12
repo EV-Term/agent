@@ -30,7 +30,7 @@ if (!WebSocket) {
   process.exit(1);
 }
 
-import { install, serviceStatus, uninstall } from './service.js';
+import { install, isInstalledCopy, RUN_AS, serviceStatus, uninstall } from './service.js';
 import {
   acceptHandshake,
   fingerprint,
@@ -38,17 +38,6 @@ import {
   opener,
   sealer,
 } from './session-crypto.js';
-
-/* How to say "run this again" in a way that actually works where you are.
- *
- * The documented way in is `npx github:EV-Term/agent`, which fetches the
- * package, runs it once, and puts nothing on PATH. So every message telling
- * someone to run `evterm status` was telling them to run a command they do not
- * have, and the only sign of it was `command not found` right after a pairing
- * that had otherwise worked. */
-const RUN_AS = /[/\\](?:_npx|\.npm[/\\]_npx)[/\\]/.test(fileURLToPath(import.meta.url))
-  ? 'npx github:EV-Term/agent'
-  : 'evterm';
 
 const CONFIG_DIR = path.join(os.homedir(), '.evterm');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'agent.json');
@@ -455,7 +444,9 @@ if (command === 'link') {
     console.error(`run \`${RUN_AS} link <CODE>\` again to generate a key pair.`);
     process.exit(1);
   }
-  if (serviceStatus().includes('loaded') || serviceStatus().includes('active')) {
+  // Not when we are the service: it would be warning about itself, in its own
+  // log, on every boot.
+  if (!isInstalledCopy() && /loaded|active/.test(serviceStatus())) {
     console.log('note: a background service is already running this agent.');
     console.log('      two copies on one machine will take turns; stop one.\n');
   }

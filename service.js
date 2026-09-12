@@ -18,6 +18,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+/* How to say "run this again" in a way that works where you are. The
+ * documented way in is `npx github:EV-Term/agent`, which runs the package once
+ * and puts nothing on PATH, so telling someone to run `evterm uninstall` names
+ * a command they do not have. */
+export const RUN_AS = /[/\\](?:_npx|\.npm[/\\]_npx)[/\\]/.test(fileURLToPath(import.meta.url))
+  ? 'npx -y github:EV-Term/agent'
+  : 'evterm';
+
 const HOME = os.homedir();
 const CONFIG_DIR = path.join(HOME, '.evterm');
 const INSTALL_DIR = path.join(CONFIG_DIR, 'agent');
@@ -162,7 +170,7 @@ function installLaunchd() {
     '',
     `  logs      tail -f ${LOG}`,
     `  stop      launchctl bootout ${target}/${LABEL}`,
-    '  remove    evterm uninstall',
+    `  remove    ${RUN_AS} uninstall`,
   ];
 }
 
@@ -196,7 +204,7 @@ WantedBy=default.target
     '',
     '  logs      journalctl --user -u evterm -f',
     '  stop      systemctl --user stop evterm',
-    '  remove    evterm uninstall',
+    `  remove    ${RUN_AS} uninstall`,
   ];
 
   // Without lingering, a user service stops when the last login session ends,
@@ -284,6 +292,11 @@ export function uninstall() {
   // machine. `evterm unlink` is the one that takes the credentials away.
   return done.length ? done : ['no service was installed.'];
 }
+
+/* True when this process is the copy the service runs, which is how it avoids
+ * warning that a service is already running this agent: it is that service. */
+export const isInstalledCopy = () =>
+  path.resolve(path.dirname(fileURLToPath(import.meta.url))) === path.resolve(INSTALL_DIR);
 
 export function serviceStatus() {
   if (process.platform === 'darwin') {
