@@ -435,6 +435,17 @@ function openAuthorizedShell(s, send) {
   const flush = () => {
     flushTimer = null;
     if (!pending.length) return;
+    // Revocation was only ever checked on the inbound path, so a browser that
+    // stopped typing - watching a build, tailing a log - kept receiving output
+    // from a key that had already been removed. Same check, same shutdown as
+    // the inbound side, just triggered by output instead of a keystroke.
+    if (!(readConfig()?.authorizedKeys || []).includes(s.browserKey)) {
+      pending = [];
+      if (sessions.get(sid) === s) sessions.delete(sid);
+      child.kill();
+      send({ t: 'status', sid, s: 'error', msg: 'browser authorization revoked', final: true });
+      return;
+    }
     const chunk = Buffer.concat(pending);
     pending = [];
     // Sealing is async and the counter inside the sealer is what orders these,
@@ -443,7 +454,7 @@ function openAuthorizedShell(s, send) {
     sealing = sealing
       .then(() => seal(chunk))
       .then((d) => send({ t: 'data', sid, d }))
-      .catch(() => {});
+      .catch((err) => console.error(`dropped an output frame for ${sid}: ${err.message}`));
   };
   let sealing = Promise.resolve();
   const onOut = (chunk) => {
