@@ -40,6 +40,7 @@ import {
   newChallenge,
   validateBrowserKey,
   verifyAuthorization,
+  verifyControl,
 } from './session-crypto.js';
 
 const CONFIG_DIR = path.join(os.homedir(), '.evterm');
@@ -292,8 +293,19 @@ function run(cfg, opts = {}) {
       if (s) { clearTimeout(s.timer); sessions.delete(msg.sid); s.child?.kill(); }
     } else if (msg.t === 'kill') {
       // An unsigned relay message must never execute a command on the machine.
+      // Signed control requests are the supported way; see below.
       send({ t: 'killed', session: msg.session, ok: false,
-        msg: 'Connect with an authorized browser and type exit to end this session.' });
+        msg: 'Update EV Term on this machine to manage sessions from the car.' });
+    } else if (msg.t === 'control') {
+      // Step one: a fresh challenge, so a signature cannot be replayed and the
+      // relay cannot mint one of its own.
+      const challenge = newChallenge();
+      control.set(msg.rid, { challenge, op: msg.op, session: msg.session, at: Date.now() });
+      send({ t: 'control-challenge', rid: msg.rid, challenge });
+    } else if (msg.t === 'control-do') {
+      runControl(msg, send, cfg).catch((err) =>
+        send({ t: 'control-result', rid: msg.rid, ok: false, msg: err.message })
+      );
     }
   });
 
@@ -313,6 +325,67 @@ function run(cfg, opts = {}) {
 
   ws.addEventListener('close', reconnect);
   ws.addEventListener('error', () => {});
+}
+
+/* Control requests waiting for their signature. Short lived on purpose: a
+ * challenge that outlives the moment is a replay window. */
+const control = new Map();
+const CONTROL_TTL_MS = 60_000;
+
+/* Step two: the browser has signed the challenge together with what it is
+ * asking for, so the relay can neither invent a request nor alter this one.
+ * Only then does anything run, and only ever one of two fixed commands — there
+ * is no path here that takes a string from the wire and executes it. */
+async function runControl(msg, send, cfg) {
+  for (const [rid, entry] of control) {
+    if (Date.now() - entry.at > CONTROL_TTL_MS) control.delete(rid);
+  }
+  const pending = control.get(msg.rid);
+  if (!pending) throw new Error('that request expired, try again');
+  control.delete(msg.rid);
+
+  const allowed = readConfig()?.authorizedKeys || [];
+  const ok =
+    allowed.includes(msg.publicKey) &&
+    (await verifyControl(msg.publicKey, msg.signature, pending.challenge, cfg.publicKey, pending));
+  if (!ok) throw new Error('This browser is not authorized on this machine.');
+
+  if (!haveCommand('tmux')) throw new Error('tmux is not installed on this machine');
+
+  if (pending.op === 'list') {
+    const out = execFileSync(
+      '/bin/sh',
+      ['-c', "tmux list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}' 2>/dev/null || true"],
+      { encoding: 'utf8' }
+    );
+    const sessions = out
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [name, windows, attached] = line.split('|');
+        return { name, windows: Number(windows) || 1, attached: attached === '1' };
+      })
+      .filter((entry) => entry.name);
+    send({ t: 'control-result', rid: msg.rid, ok: true, sessions });
+    return;
+  }
+
+  if (pending.op === 'kill') {
+    const name = safeName(pending.session, '');
+    if (!name) throw new Error('invalid session name');
+    try {
+      execFileSync('/bin/sh', ['-c', `tmux kill-session -t ${shellQuote(name)}`], { stdio: 'pipe' });
+    } catch (err) {
+      // Already gone is the outcome the caller wanted.
+      const said = String(err.stderr || '');
+      if (!/can't find session|no server running/i.test(said)) throw new Error(said.trim() || 'could not end it');
+    }
+    send({ t: 'control-result', rid: msg.rid, ok: true });
+    return;
+  }
+
+  throw new Error('unknown control operation');
 }
 
 const clamp = (n, lo, hi) => Math.min(Math.max(Number(n) || lo, lo), hi);

@@ -239,3 +239,39 @@ export async function verifyAuthorization(publicKey, signature, challenge, machi
       unb64u(signature), authorizationBytes(challenge, machineKey, request));
   } catch { return false; }
 }
+
+/* --- control operations, outside a session --------------------------------
+ *
+ * Listing what tmux is holding on a machine, and ending one of those sessions,
+ * are things the car has to be able to do without a shell already open. Over
+ * SSH the server does it directly, because over there the server is the SSH
+ * client anyway. A machine that dialled in is the opposite case: the relay must
+ * not be able to run anything on it, which is why the agent refuses an unsigned
+ * `kill` frame — and why, before this, there was no way at all to end a session
+ * on a linked machine. The product claimed otherwise.
+ *
+ * So a control request is signed by an authorized browser, exactly as opening a
+ * shell is. Its own domain string and its own tuple, separate from the session
+ * authorization above: a signature that opens a shell must never be replayable
+ * as one that kills something, and vice versa.
+ */
+function controlBytes(challenge, machineKey, op) {
+  return new TextEncoder().encode(JSON.stringify([
+    'evterm control v1', challenge, machineKey, op.op || '', op.session || '',
+  ]));
+}
+
+export async function signControl(identity, challenge, machineKey, op) {
+  const key = typeof identity.privateKey === 'string'
+    ? await SUBTLE.importKey('pkcs8', unb64u(identity.privateKey), SIGNING, false, ['sign'])
+    : identity.privateKey;
+  return b64u(await SUBTLE.sign(SIGN_ALGORITHM, key, controlBytes(challenge, machineKey, op)));
+}
+
+export async function verifyControl(publicKey, signature, challenge, machineKey, op) {
+  try {
+    if (typeof signature !== 'string' || signature.length > 150) return false;
+    return await SUBTLE.verify(SIGN_ALGORITHM, await validateBrowserKey(publicKey),
+      unb64u(signature), controlBytes(challenge, machineKey, op));
+  } catch { return false; }
+}
