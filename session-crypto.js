@@ -4,6 +4,16 @@
  * them: it is someone else's box, and a terminal session carries whatever you
  * type, including the things you would never send to a third party on purpose.
  *
+ * Be precise about what this buys, because the shape of it is easy to overstate.
+ * Noise_NK authenticates the responder — this machine — and leaves the initiator
+ * anonymous by construction. So the relay cannot read a session the car opened,
+ * and cannot substitute its own key for this machine's without the car noticing
+ * at the fingerprint. What it does not do is prove that an `open` request came
+ * from the account rather than from the relay itself: this agent accepts any
+ * key exchange that arrives down the link it dialled. Closing that means pinning
+ * an account key at link time and requiring the browser's half to be signed by
+ * it, which changes the pairing protocol and is the next thing to build.
+ *
  * The exchange is Noise_NK in shape. The browser already knows the agent's
  * long-term public key, because it pinned it the first time it connected, the
  * same way this app already handles SSH host keys. So:

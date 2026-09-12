@@ -101,6 +101,14 @@ Worth knowing:
 Sessions are encrypted between the car and this machine. The server relays
 frames it cannot read.
 
+Noise_NK authenticates the responder — this machine — and leaves the initiator
+anonymous. The relay therefore cannot read a session the car opened, and cannot
+swap its own key in for this machine's without the car showing you a different
+fingerprint. It does not prove that a request to open a session came from your
+account rather than from the relay itself: this agent accepts any key exchange
+arriving down the link it dialled. Self-hosting removes the question; otherwise
+it is worth knowing.
+
 The key pair is generated here, at `evterm link`, and the private half never
 leaves. The car pins the public half the first time it connects, the way SSH
 pins a host key. That pinning is what makes the server relaying the key safe:
