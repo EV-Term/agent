@@ -153,6 +153,14 @@ function resizeSession(session, cols, rows) {
 
 const sessions = new Map();
 
+/* Module scope, not inside run().
+ *
+ * It used to be declared in run(), which reconnect() calls afresh — so every
+ * attempt started again at one second and the doubling on the line below was
+ * dead code. During any outage every agent in the field retried once a second,
+ * forever, which is a stampede aimed at the one box they all dial. */
+let backoff = 1000;
+
 function run(cfg, opts = {}) {
   const { code } = opts;
   const base = cfg.server.replace(/^http/, 'ws').replace(/\/+$/, '');
@@ -164,14 +172,13 @@ function run(cfg, opts = {}) {
   else params.set('token', cfg.token);
 
   const ws = new WebSocket(`${base}/agent?${params}`);
-  let backoff = 1000;
 
   const send = (frame) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
   };
 
   ws.addEventListener('open', () => {
-    backoff = 1000;
+    backoff = 1000; // a connection that opened is a fresh start
     // The server is told the public half so it can hand it to a browser that
     // has not met this machine before. It can lie about it, which is exactly
     // what the fingerprint check in the car is for.
@@ -288,8 +295,10 @@ function run(cfg, opts = {}) {
     }
     if (code) return; // linking is a one-shot, not a daemon
     console.error(`disconnected, retrying in ${Math.round(backoff / 1000)}s`);
-    setTimeout(() => run(cfg), backoff);
+    // Jittered, so N agents that lost the same server do not come back in step.
+    const wait = backoff + Math.floor(Math.random() * 1000);
     backoff = Math.min(backoff * 2, 30000);
+    setTimeout(() => run(cfg), wait);
   };
 
   ws.addEventListener('close', reconnect);
