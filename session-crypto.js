@@ -177,9 +177,19 @@ export function opener(keys, direction) {
     if (dot < 1) throw new Error('malformed frame');
     const counter = BigInt(String(frame).slice(0, dot));
 
-    // Refusing anything not strictly newer is what stops the relay replaying an
-    // old frame, or quietly dropping one and having the rest still decrypt.
-    if (counter < expected) throw new Error('replayed or reordered frame');
+    /* Exactly the next one. Nothing else is this stream.
+     *
+     * This used to refuse only counters *older* than expected, which stops a
+     * replay but not a truncation: the relay could drop a frame — a line of
+     * output, a keystroke, a confirmation prompt — and everything after it
+     * still decrypted, so neither end could tell. The comment here claimed
+     * otherwise, which is the worse half of the bug.
+     *
+     * A gap is not something a working transport produces: this rides on a
+     * WebSocket over TCP, which does not lose frames without closing, and the
+     * sealing side chains its writes so they leave in counter order. So a gap
+     * means someone in the middle, and the session ends. */
+    if (counter !== expected) throw new Error('frame out of sequence: dropped or replayed');
     expected = counter + 1n;
 
     const nonce = new Uint8Array(12);

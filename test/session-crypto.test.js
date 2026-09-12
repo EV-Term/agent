@@ -67,11 +67,27 @@ await assert.rejects(
   'a substituted static key must not produce a working session'
 );
 
-// --- the relay cannot replay or reorder ------------------------------------
-const first = await toAgent(text('one'));
-const second = await toAgent(text('two'));
-assert.equal(str(await fromBrowser(second)), 'two');
-await assert.rejects(fromBrowser(first), /replayed or reordered/);
+/* --- the relay cannot replay, reorder, or quietly drop ---------------------
+ *
+ * Strictly the next counter, every time. Refusing only *older* frames stops a
+ * replay but not a truncation: the relay could drop one — a line of output, a
+ * keystroke, a confirmation prompt — and everything after it would still
+ * decrypt, so neither end could tell. A gap is not something a working
+ * transport produces here (WebSocket over TCP does not lose frames without
+ * closing, and the sealing side chains its writes), so a gap means someone in
+ * the middle. */
+// Its own pair, because the checks above deliberately sealed a frame that was
+// never delivered, and under the strict rule that is itself a gap.
+const seq = sealer(browserKeys, 'toAgent');
+const inSeq = opener(accepted.keys, 'toAgent');
+const first = await seq(text('one'));
+const second = await seq(text('two'));
+const third = await seq(text('three'));
+
+assert.equal(str(await inSeq(first)), 'one');
+await assert.rejects(inSeq(third), /out of sequence/, 'a skipped frame ends the session');
+await assert.rejects(inSeq(first), /out of sequence/, 'and a replayed one does too');
+assert.ok(second, 'the frame the relay would have dropped');
 
 // --- the relay cannot tamper -----------------------------------------------
 const frame = await toAgent(text('rm -rf /tmp/safe'));
