@@ -16,6 +16,8 @@ import {
   newChallenge,
   signAuthorization,
   verifyAuthorization,
+  signControl,
+  verifyControl,
 } from '../session-crypto.js';
 
 const SID = 's1';
@@ -137,6 +139,47 @@ assert.equal(
   await verifyAuthorization(authorizedBrowser.publicKey, signature, newChallenge(), agent.publicKey, request),
   false,
   'a captured proof cannot be replayed'
+);
+
+/* --- control operations: listing/killing sessions without a shell open -----
+ *
+ * This is the signed challenge-response the S9/S10 fix added so the car can
+ * manage tmux sessions on a machine that dialled in, without the relay (or
+ * anyone who merely reaches the endpoint) being able to do the same. It had
+ * no test of its own before this - only the session-authorization half above
+ * did - so a regression here could ship silently.
+ */
+const controlChallenge = newChallenge();
+const killOp = { op: 'kill', session: 'work' };
+const controlSignature = await signControl(authorizedBrowser, controlChallenge, agent.publicKey, killOp);
+assert.equal(
+  await verifyControl(authorizedBrowser.publicKey, controlSignature, controlChallenge, agent.publicKey, killOp),
+  true,
+  'authorized browser verifies a control request'
+);
+assert.equal(
+  await verifyControl(authorizedBrowser.publicKey, controlSignature, controlChallenge, agent.publicKey, { op: 'kill', session: 'other' }),
+  false,
+  'the signature binds which session it may end'
+);
+assert.equal(
+  await verifyControl(authorizedBrowser.publicKey, controlSignature, newChallenge(), agent.publicKey, killOp),
+  false,
+  'a captured control proof cannot be replayed'
+);
+
+// The two signature domains must not cross: a signature good for opening a
+// shell must not also authorize ending one, even for the same challenge and
+// machine, or an intercepted "open" proof becomes a "kill" for free.
+assert.equal(
+  await verifyControl(authorizedBrowser.publicKey, signature, challenge, agent.publicKey, killOp),
+  false,
+  'a session-authorization signature must not verify as a control signature'
+);
+assert.equal(
+  await verifyAuthorization(authorizedBrowser.publicKey, controlSignature, controlChallenge, agent.publicKey, request),
+  false,
+  'a control signature must not verify as a session authorization'
 );
 
 console.log('session-crypto: ok');
