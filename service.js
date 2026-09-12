@@ -277,13 +277,18 @@ function installShim() {
   );
 
   const onPath = (process.env.PATH || '').split(':').includes(dir);
-  return onPath
-    ? ['', 'you can now run `evterm status` from anywhere.']
-    : [
-        '',
-        `installed \`evterm\` at ${shim}, which is not on your PATH. add it with:`,
-        `  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile && . ~/.profile`,
-      ];
+  if (onPath) return ['', 'you can now run `evterm status` from anywhere.'];
+
+  // Not on this shell's PATH, which is not the same as not on PATH. Debian and
+  // most distributions add ~/.local/bin from ~/.profile when the directory
+  // exists, and it did not exist until a moment ago, so the next login shell
+  // usually has it. Say that before offering the edit.
+  return [
+    '',
+    `installed \`evterm\` at ${shim}.`,
+    'open a new terminal and run `evterm status`. if that still says command not found:',
+    `  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile && . ~/.profile`,
+  ];
 }
 
 export async function install() {
