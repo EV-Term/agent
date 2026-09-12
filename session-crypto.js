@@ -4,15 +4,10 @@
  * them: it is someone else's box, and a terminal session carries whatever you
  * type, including the things you would never send to a third party on purpose.
  *
- * Be precise about what this buys, because the shape of it is easy to overstate.
- * Noise_NK authenticates the responder — this machine — and leaves the initiator
- * anonymous by construction. So the relay cannot read a session the car opened,
- * and cannot substitute its own key for this machine's without the car noticing
- * at the fingerprint. What it does not do is prove that an `open` request came
- * from the account rather than from the relay itself: this agent accepts any
- * key exchange that arrives down the link it dialled. Closing that means pinning
- * an account key at link time and requiring the browser's half to be signed by
- * it, which changes the pairing protocol and is the next thing to build.
+ * Each session also requires an ECDSA signature from a browser explicitly
+ * authorized on the machine. A fresh agent challenge and the complete launch
+ * request are signed before any process is started. Transport encryption alone
+ * does not authorize a shell.
  *
  * The exchange is Noise_NK in shape. The browser already knows the agent's
  * long-term public key, because it pinned it the first time it connected, the
@@ -196,4 +191,51 @@ export function opener(keys, direction) {
     );
     return new Uint8Array(plain);
   };
+}
+
+// Browser authorization is separate from the machine's ECDH identity.
+const SIGNING = { name: 'ECDSA', namedCurve: 'P-256' };
+const SIGN_ALGORITHM = { name: 'ECDSA', hash: 'SHA-256' };
+
+export async function generateBrowserIdentity() {
+  const pair = await SUBTLE.generateKey(SIGNING, true, ['sign', 'verify']);
+  return {
+    publicKey: b64u(await SUBTLE.exportKey('spki', pair.publicKey)),
+    privateKey: b64u(await SUBTLE.exportKey('pkcs8', pair.privateKey)),
+  };
+}
+
+export async function validateBrowserKey(key) {
+  if (typeof key !== 'string' || key.length > 200 || !/^[A-Za-z0-9_-]+$/.test(key)) {
+    throw new Error('invalid browser public key');
+  }
+  return SUBTLE.importKey('spki', unb64u(key), SIGNING, false, ['verify']);
+}
+
+export function newChallenge() {
+  return b64u(globalThis.crypto.getRandomValues(new Uint8Array(32)));
+}
+
+// An ordered tuple prevents serialization differences. All executable launch
+// parameters are bound to the signature, as are the machine and ephemeral key.
+function authorizationBytes(challenge, machineKey, request) {
+  return new TextEncoder().encode(JSON.stringify([
+    'evterm browser authorization v1', challenge, machineKey, request.sid,
+    request.kx, request.tmuxSession || 'evterm', request.startCommand || '',
+  ]));
+}
+
+export async function signAuthorization(identity, challenge, machineKey, request) {
+  const key = typeof identity.privateKey === 'string'
+    ? await SUBTLE.importKey('pkcs8', unb64u(identity.privateKey), SIGNING, false, ['sign'])
+    : identity.privateKey;
+  return b64u(await SUBTLE.sign(SIGN_ALGORITHM, key, authorizationBytes(challenge, machineKey, request)));
+}
+
+export async function verifyAuthorization(publicKey, signature, challenge, machineKey, request) {
+  try {
+    if (typeof signature !== 'string' || signature.length > 150) return false;
+    return await SUBTLE.verify(SIGN_ALGORITHM, await validateBrowserKey(publicKey),
+      unb64u(signature), authorizationBytes(challenge, machineKey, request));
+  } catch { return false; }
 }

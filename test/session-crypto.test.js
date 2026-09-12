@@ -7,11 +7,15 @@
 import assert from 'node:assert/strict';
 import {
   generateIdentity,
+  generateBrowserIdentity,
   fingerprint,
   startHandshake,
   acceptHandshake,
   sealer,
   opener,
+  newChallenge,
+  signAuthorization,
+  verifyAuthorization,
 } from '../session-crypto.js';
 
 const SID = 's1';
@@ -96,5 +100,27 @@ const fp = await fingerprint(agent.publicKey);
 assert.match(fp, /^[0-9A-F]{4}(-[0-9A-F]{4}){3}$/, 'reads as four short groups');
 assert.equal(fp, await fingerprint(agent.publicKey), 'stable');
 assert.notEqual(fp, await fingerprint(impostor.publicKey));
+
+// Encryption confirms the machine, while this signature confirms the browser
+// was explicitly authorized by the machine owner before a shell can start.
+const authorizedBrowser = await generateBrowserIdentity();
+const request = { sid: SID, kx: browser.ephemeralPublic, tmuxSession: 'work', startCommand: 'codex' };
+const challenge = newChallenge();
+const signature = await signAuthorization(authorizedBrowser, challenge, agent.publicKey, request);
+assert.equal(
+  await verifyAuthorization(authorizedBrowser.publicKey, signature, challenge, agent.publicKey, request),
+  true,
+  'authorized browser verifies'
+);
+assert.equal(
+  await verifyAuthorization(authorizedBrowser.publicKey, signature, challenge, agent.publicKey, { ...request, startCommand: 'sh' }),
+  false,
+  'the signature binds the executable launch request'
+);
+assert.equal(
+  await verifyAuthorization(authorizedBrowser.publicKey, signature, newChallenge(), agent.publicKey, request),
+  false,
+  'a captured proof cannot be replayed'
+);
 
 console.log('session-crypto: ok');

@@ -3,17 +3,17 @@
 Connects a machine you own to [EV Term](https://evterm.com) so you can reach a
 shell on it from your car.
 
-```bash
-curl -fsSL https://evterm.com/install.sh | sh -s ABC123
-```
-
-The code comes from the app: open EV Term in the car, tap **Add machine**, and
-it shows you six characters. That script checks Node and tmux and then runs the
-one command it exists to save you typing:
+Open EV Term on the computer you want to reach and choose **Add machine**. It
+shows one complete command containing a short pairing code and this browser's
+public authorization key. Run that exact command there.
 
 ```bash
-npx -y github:EV-Term/agent link ABC123
+npx -y github:EV-Term/agent link ABC123 --allow-key BROWSER_PUBLIC_KEY
 ```
+
+The key belongs to that browser. The machine checks a fresh signature from it
+before starting every shell, so the relay cannot start a shell just because it
+holds the agent connection.
 
 Either way, linking pairs the machine **and** installs a small background
 service, because a machine that only runs while a terminal window is open is not
@@ -32,8 +32,8 @@ than it sounds: a car drops its connection constantly.
 
 ## What it needs
 
-- **Node 22+** — for the built-in WebSocket client. That is the whole reason this
-  has no dependencies.
+- **Node 22+ recommended** — it has the built-in WebSocket client. Node 20 also
+  works with the bundled `ws` helper.
 - **tmux** — `brew install tmux`, `apt install tmux`. Without it you still get a
   shell, but it dies with the connection.
 - **python3** — for the terminal itself. Node cannot open a pty on its own, and
@@ -46,7 +46,9 @@ than it sounds: a car drops its connection constantly.
 
 | | |
 | --- | --- |
-| `evterm link <CODE>` | Pair with an account. Writes `~/.evterm/agent.json`, mode 600. |
+| `evterm link <CODE> --allow-key <KEY>` | Pair and authorize the browser that initiated setup. Writes `~/.evterm/agent.json`, mode 600. |
+| `evterm authorize <KEY>` | Allow another browser you own to open shells here. |
+| `evterm deauthorize <KEY>` | Remove a browser's access immediately. |
 | `evterm` | Stay connected. This is the one you leave running. |
 | `evterm install` | Keep it running: a launchd agent on macOS, a systemd user service on Linux. |
 | `evterm status` | What it is linked to, and whether the service is loaded. |
@@ -59,7 +61,7 @@ than it sounds: a car drops its connection constantly.
 hands the job to the operating system instead:
 
 ```sh
-npx -y github:EV-Term/agent link 7K4QPS     # installs the service too
+npx -y github:EV-Term/agent link 7K4QPS --allow-key BROWSER_PUBLIC_KEY # installs the service too
 npx -y github:EV-Term/agent install          # or on its own, later
 ```
 
@@ -88,8 +90,9 @@ dependencies, and deliberately short enough to get through.
 
 Worth knowing:
 
-- The token in `~/.evterm/agent.json` is a bearer credential. Anyone holding it
-  can ask for a shell here. The server stores only a hash of it.
+- The token in `~/.evterm/agent.json` identifies this machine to the relay. It
+  cannot open a shell by itself: the agent also requires a fresh signature from
+  an authorized browser. The server stores only a hash of the token.
 - Removing the machine in the app revokes it immediately: the agent is told, and
   it deletes its own copy rather than retrying forever with a dead token.
 - `evterm unlink` only clears this end. Remove the machine in the app too, or it
@@ -101,13 +104,11 @@ Worth knowing:
 Sessions are encrypted between the car and this machine. The server relays
 frames it cannot read.
 
-Noise_NK authenticates the responder — this machine — and leaves the initiator
-anonymous. The relay therefore cannot read a session the car opened, and cannot
-swap its own key in for this machine's without the car showing you a different
-fingerprint. It does not prove that a request to open a session came from your
-account rather than from the relay itself: this agent accepts any key exchange
-arriving down the link it dialled. Self-hosting removes the question; otherwise
-it is worth knowing.
+Noise_NK authenticates this machine and protects session traffic from the relay.
+Before the shell starts, the agent verifies a fresh ECDSA signature from a
+browser key that you explicitly authorized on this machine. The signature binds
+the browser's ephemeral key, session, tmux name, and start command; it cannot be
+replayed for another session or changed by the relay.
 
 The key pair is generated here, at `evterm link`, and the private half never
 leaves. The car pins the public half the first time it connects, the way SSH

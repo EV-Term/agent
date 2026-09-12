@@ -37,6 +37,9 @@ import {
   generateIdentity,
   opener,
   sealer,
+  newChallenge,
+  validateBrowserKey,
+  verifyAuthorization,
 } from './session-crypto.js';
 
 const CONFIG_DIR = path.join(os.homedir(), '.evterm');
@@ -182,7 +185,7 @@ function run(cfg, opts = {}) {
     // The server is told the public half so it can hand it to a browser that
     // has not met this machine before. It can lie about it, which is exactly
     // what the fingerprint check in the car is for.
-    send({ t: 'hello', publicKey: cfg.publicKey });
+    send({ t: 'hello', publicKey: cfg.publicKey, authorization: 1, capabilities: { tmux: haveCommand('tmux'), python: haveCommand('python3'), tools: ['claude', 'codex', 'gemini', 'cursor-agent'].filter(haveCommand) } });
     console.log(`connected to ${cfg.server} as "${cfg.label}"`);
     if (!code) console.log('waiting for the car. ctrl-c to stop.');
   });
@@ -255,42 +258,49 @@ function run(cfg, opts = {}) {
       // A frame that will not open is not written to the shell. Decryption
       // failing means the bytes are not the car's, and the only safe thing to
       // do with input of unknown origin is drop the session.
-      s.open(msg.d).then(
-        (plain) => s.child.stdin.write(plain),
-        () => {
-          send({ t: 'status', sid: msg.sid, s: 'error', msg: 'bad frame', final: true });
-          s.child.kill();
+      // Serial processing preserves nonce order even during async verification.
+      s.reading = (s.reading || Promise.resolve()).then(async () => {
+        const plain = await s.open(msg.d);
+        if (!s.authorized) {
+          if (sessions.get(msg.sid) !== s) throw new Error('authorization expired');
+          const proof = JSON.parse(new TextDecoder().decode(plain));
+          const allowed = readConfig()?.authorizedKeys || [];
+          if (!allowed.includes(proof.publicKey) || !await verifyAuthorization(
+            proof.publicKey, proof.signature, s.challenge, cfg.publicKey, s.request
+          )) throw new Error('This browser is not authorized. Run its authorization command on the machine.');
+          clearTimeout(s.timer);
+          s.authorized = true;
+          s.browserKey = proof.publicKey;
+          openAuthorizedShell(s, send);
+        } else {
+          // Local revocation takes effect on existing sessions as well.
+          if (!(readConfig()?.authorizedKeys || []).includes(s.browserKey)) throw new Error('browser authorization revoked');
+          s.child.stdin.write(plain);
         }
-      );
+      }).catch((err) => {
+        clearTimeout(s.timer);
+        if (sessions.get(msg.sid) === s) sessions.delete(msg.sid);
+        s.child?.kill();
+        send({ t: 'status', sid: msg.sid, s: 'error', msg: err.message, final: true });
+      });
     } else if (msg.t === 'resize') {
       const s = sessions.get(msg.sid);
-      if (s) resizeSession(s, clamp(msg.cols, 20, 500), clamp(msg.rows, 5, 200));
+      if (s?.child) resizeSession(s, clamp(msg.cols, 20, 500), clamp(msg.rows, 5, 200));
     } else if (msg.t === 'close') {
       const s = sessions.get(msg.sid);
       // Detaching, not killing: the work in tmux outlives the car losing signal.
-      if (s) s.child.kill();
+      if (s) { clearTimeout(s.timer); sessions.delete(msg.sid); s.child?.kill(); }
     } else if (msg.t === 'kill') {
-      // The other kind of ending: stop the work, not just the view of it. There
-      // is no SSH to this machine, so without this the car can detach from a
-      // session it can never end, and something left running in tmux here has
-      // no off switch anywhere.
-      const name = safeName(msg.session, '');
-      if (!name) return;
-      try {
-        execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'pipe' });
-        send({ t: 'killed', session: name, ok: true });
-      } catch (err) {
-        // Already gone counts as done: the caller wanted it to not exist.
-        const text = String(err.stderr || err.message || '');
-        const gone = /can't find session|no server running/i.test(text);
-        send({ t: 'killed', session: name, ok: gone, msg: gone ? '' : text.trim().slice(0, 200) });
-      }
+      // An unsigned relay message must never execute a command on the machine.
+      send({ t: 'killed', session: msg.session, ok: false,
+        msg: 'Connect with an authorized browser and type exit to end this session.' });
     }
   });
 
   const reconnect = () => {
     for (const [sid, s] of sessions) {
-      s.child.kill();
+      clearTimeout(s.timer);
+      s.child?.kill();
       sessions.delete(sid);
     }
     if (code) return; // linking is a one-shot, not a daemon
@@ -309,7 +319,9 @@ const clamp = (n, lo, hi) => Math.min(Math.max(Number(n) || lo, lo), hi);
 
 async function handleOpen(msg, send, cfg) {
   const sid = msg.sid;
-  if (sessions.has(sid)) return;
+  if (typeof sid !== 'string' || sid.length > 100 || sessions.has(sid)) return;
+  if (sessions.size >= 16) throw new Error('too many sessions; close a tab and retry');
+  if (!(readConfig()?.authorizedKeys || []).length) throw new Error('Authorize a browser on this machine first. Update and run the authorization command shown in EV Term.');
 
   // No plaintext path. A session that cannot be encrypted does not open, rather
   // than falling back to something the server could read.
@@ -323,18 +335,25 @@ async function handleOpen(msg, send, cfg) {
   const seal = sealer(keys, 'toBrowser');
   const unseal = opener(keys, 'toAgent');
 
+  const s = { request: { ...msg }, open: unseal, seal, challenge: newChallenge(), authorized: false, child: null };
+  sessions.set(sid, s);
+  s.timer = setTimeout(() => {
+    if (sessions.get(sid) !== s || s.authorized) return;
+    sessions.delete(sid);
+    send({ t: 'status', sid, s: 'error', msg: 'Browser authorization timed out. Reconnect to try again.', final: true });
+  }, 30_000);
+  s.timer.unref();
+  send({ t: 'status', sid, s: 'challenge', kx: ephemeralPublic, challenge: s.challenge });
+}
+
+function openAuthorizedShell(s, send) {
+  const msg = s.request;
+  const sid = msg.sid;
+  const seal = s.seal;
   const name = safeName(msg.tmuxSession, 'evterm');
-  const cols = clamp(msg.cols, 20, 500);
-  const rows = clamp(msg.rows, 5, 200);
-  let child;
-  try {
-    child = spawnPty(buildCommand(name, msg.startCommand), cols, rows);
-  } catch (err) {
-    // Final: no amount of retrying finds a pty that is not installed.
-    send({ t: 'status', sid, s: 'error', msg: err.message, final: true });
-    return;
-  }
-  sessions.set(sid, { child, name, open: unseal });
+  const child = spawnPty(buildCommand(name, msg.startCommand), clamp(msg.cols, 20, 500), clamp(msg.rows, 5, 200));
+  s.child = child;
+  s.name = name;
 
   // Coalesce before sending. A shell streams in many tiny writes, and one frame
   // per write is mostly framing overhead over a car's mobile connection.
@@ -375,7 +394,7 @@ async function handleOpen(msg, send, cfg) {
     send({ t: 'status', sid, s: 'closed', msg: 'session ended', final: true });
   });
 
-  send({ t: 'status', sid, s: 'ready', msg: os.hostname(), kx: ephemeralPublic });
+  send({ t: 'status', sid, s: 'ready', msg: os.hostname(), authorized: true });
 }
 
 /* --- cli ----------------------------------------------------------------- */
@@ -391,6 +410,11 @@ if (command === 'link') {
   const code = argv[argv.indexOf('link') + 1];
   if (!code || code.startsWith('--')) {
     console.error(`usage: ${RUN_AS} link <CODE> [--server https://...] [--name "My laptop"]`);
+    process.exit(1);
+  }
+  const allowKey = flag('allow-key', '');
+  try { await validateBrowserKey(allowKey); } catch {
+    console.error('Use the complete setup command from EV Term, including --allow-key.');
     process.exit(1);
   }
   const existing = readConfig();
@@ -410,11 +434,23 @@ if (command === 'link') {
     {
       server: flag('server', (existing && existing.server) || DEFAULT_SERVER),
       label: flag('name', os.hostname()),
+      authorizedKeys: [allowKey],
       publicKey: identity.publicKey,
       privateKey: identity.privateKey,
     },
     { code: code.toUpperCase(), install: !argv.includes('--no-install') }
   );
+} else if (command === 'authorize' || command === 'deauthorize') {
+  const cfg = readConfig();
+  if (!cfg?.token) { console.error('Link this machine first.'); process.exit(1); }
+  const key = argv[argv.indexOf(command) + 1];
+  try { await validateBrowserKey(key); } catch { console.error('Copy the complete browser authorization command from EV Term.'); process.exit(1); }
+  const keys = new Set(cfg.authorizedKeys || []);
+  if (command === 'authorize') keys.add(key); else keys.delete(key);
+  if (keys.size > 32) { console.error('Remove an old browser before authorizing another.'); process.exit(1); }
+  writeConfig({ ...cfg, authorizedKeys: [...keys] });
+  console.log(`${command === 'authorize' ? 'Authorized' : 'Revoked'} browser ${await fingerprint(key)}.`);
+  console.log('Applies immediately to this agent. Authorize only browsers you own.');
 } else if (command === 'unlink') {
   try {
     fs.rmSync(CONFIG_FILE);
@@ -446,6 +482,10 @@ if (command === 'link') {
   console.log(`linked to ${cfg.server} as "${cfg.label}" (id ${cfg.id})`);
   if (cfg.publicKey) console.log(`fingerprint  ${await fingerprint(cfg.publicKey)}`);
   else console.log('no key pair: linked by an older version. run `evterm link` again.');
+  console.log(`${cfg.authorizedKeys?.length || 0} authorized browser(s)`);
+  for (const key of cfg.authorizedKeys || []) console.log(`  ${await fingerprint(key)}  ${key}`);
+  console.log(`tmux: ${haveCommand('tmux') ? 'ready' : 'missing; sessions will not survive a disconnect'}`);
+  console.log('Keep this computer awake and online while using EV Term.');
   console.log(serviceStatus());
 } else {
   const cfg = readConfig();
