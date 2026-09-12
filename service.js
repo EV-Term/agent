@@ -259,6 +259,33 @@ async function confirmRunning() {
   return [];
 }
 
+/* A real `evterm` on PATH.
+ *
+ * Everything the product prints talks about `evterm status`, `evterm unlink`,
+ * and after installing from npx none of those existed: npx runs the package
+ * once out of a cache and puts nothing anywhere. Telling people to type the
+ * long npx form for the rest of the machine's life is a worse answer than a
+ * three line shim, which is also what every other tool of this shape does. */
+function installShim() {
+  const dir = path.join(HOME, '.local', 'bin');
+  const shim = path.join(dir, 'evterm');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    shim,
+    `#!/bin/sh\n# EV Term. Written by \`evterm install\`; remove with \`evterm uninstall\`.\nexec ${resolveNode()} ${ENTRY} "$@"\n`,
+    { mode: 0o755 }
+  );
+
+  const onPath = (process.env.PATH || '').split(':').includes(dir);
+  return onPath
+    ? ['', 'you can now run `evterm status` from anywhere.']
+    : [
+        '',
+        `installed \`evterm\` at ${shim}, which is not on your PATH. add it with:`,
+        `  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile && . ~/.profile`,
+      ];
+}
+
 export async function install() {
   copyAgent();
   let lines;
@@ -268,11 +295,22 @@ export async function install() {
     throw new Error(
       `no service installer for ${process.platform}. run \`evterm\` under your own supervisor instead.`
     );
-  return [...lines, ...(await confirmRunning())];
+  return [...lines, ...installShim(), ...(await confirmRunning())];
 }
 
 export function uninstall() {
   const done = [];
+  // Only our own shim: a file of that name someone else wrote is not ours to
+  // delete.
+  const shim = path.join(HOME, '.local', 'bin', 'evterm');
+  try {
+    if (fs.readFileSync(shim, 'utf8').includes(ENTRY)) {
+      fs.rmSync(shim);
+      done.push(`removed ${shim}`);
+    }
+  } catch {
+    /* not there, or not ours */
+  }
   if (process.platform === 'darwin') {
     tryRun('launchctl', ['bootout', `gui/${process.getuid()}/${LABEL}`]) ||
       tryRun('launchctl', ['unload', '-w', PLIST]);
