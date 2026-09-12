@@ -164,7 +164,8 @@ function resizeSession(session, cols, rows) {
 
 const sessions = new Map();
 
-function run(cfg, { code } = {}) {
+function run(cfg, opts = {}) {
+  const { code } = opts;
   const base = cfg.server.replace(/^http/, 'ws').replace(/\/+$/, '');
   const params = new URLSearchParams({
     label: cfg.label,
@@ -202,17 +203,34 @@ function run(cfg, { code } = {}) {
       writeConfig({ ...cfg, id: msg.id, token: msg.token });
       console.log(`paired. this machine is "${cfg.label}".`);
       console.log(`credentials in ${CONFIG_FILE}`);
-      // Linking is one shot: it pairs and exits. Until something keeps the
-      // agent running, the car shows this machine as not connected, which is
-      // exactly what it did.
-      console.log('');
-      console.log('this machine is paired but not yet connected. keep it running with:');
-      console.log(`  ${RUN_AS} install`);
-      console.log('');
-      console.log(`or ${RUN_AS} to hold it open in this terminal until you close it.`);
-      console.log(`undo with ${RUN_AS} unlink.`);
       ws.close();
-      process.exit(0);
+
+      /* Pairing on its own leaves the car showing this machine as not
+       * connected, because nothing is keeping the agent running. That was two
+       * commands, and the second one got skipped, which is the same as not
+       * having done the first. So linking installs the service too, unless
+       * asked not to. */
+      if (opts.install === false) {
+        console.log('');
+        console.log(`not installed, as asked. keep it running with ${RUN_AS} install,`);
+        console.log(`or ${RUN_AS} to hold it open in this terminal.`);
+        process.exit(0);
+      }
+
+      install().then(
+        (lines) => {
+          console.log('');
+          for (const line of lines) console.log(line);
+          process.exit(0);
+        },
+        (err) => {
+          console.error('');
+          console.error(`paired, but could not install the background service: ${err.message}`);
+          console.error(`run ${RUN_AS} to hold it open in this terminal instead.`);
+          process.exit(1);
+        }
+      );
+      return;
     }
 
     if (msg.t === 'error') {
@@ -391,7 +409,7 @@ if (command === 'link') {
       publicKey: identity.publicKey,
       privateKey: identity.privateKey,
     },
-    { code: code.toUpperCase() }
+    { code: code.toUpperCase(), install: !argv.includes('--no-install') }
   );
 } else if (command === 'unlink') {
   try {
@@ -408,7 +426,7 @@ if (command === 'link') {
     process.exit(1);
   }
   try {
-    for (const line of install()) console.log(line);
+    for (const line of await install()) console.log(line);
   } catch (err) {
     console.error(err.message);
     process.exit(1);

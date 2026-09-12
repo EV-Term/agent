@@ -13,6 +13,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,6 +71,9 @@ function resolveNode() {
     if (!fs.existsSync(candidate)) continue;
     try {
       const major = Number(run(candidate, ['--version']).replace(/^v/, '').split('.')[0]);
+      // 22 is where the WebSocket client arrives. An older one can still work
+      // with `ws` carried alongside, which is why this falls through to
+      // process.execPath rather than refusing.
       if (major >= 22) return candidate;
     } catch {
       /* not runnable, try the next one */
@@ -80,6 +84,22 @@ function resolveNode() {
   return process.execPath;
 }
 
+/* Node 22 has a WebSocket client; Node 20 does not, and uses the optional `ws`
+ * package instead. npx installs that into its own cache, which the copy under
+ * ~/.evterm/agent cannot see — so on Node 20 the service would start, fail to
+ * find a WebSocket, exit, and be restarted for ever, while `npx ... link` had
+ * worked perfectly minutes earlier. Carry it along. */
+function copyWs(dest) {
+  if (globalThis.WebSocket) return true;
+  try {
+    const from = path.dirname(createRequire(import.meta.url).resolve('ws/package.json'));
+    fs.cpSync(from, path.join(dest, 'node_modules', 'ws'), { recursive: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function copyAgent() {
   const here = path.dirname(fileURLToPath(import.meta.url));
   if (path.resolve(here) === path.resolve(INSTALL_DIR)) return; // already installed from here
@@ -87,6 +107,12 @@ function copyAgent() {
   for (const file of ['index.js', 'session-crypto.js', 'service.js', 'terminal.py']) {
     const from = path.join(here, file);
     if (fs.existsSync(from)) fs.copyFileSync(from, path.join(INSTALL_DIR, file));
+  }
+  if (!copyWs(INSTALL_DIR)) {
+    throw new Error(
+      'this Node has no built-in WebSocket and `ws` could not be found to copy alongside.\n' +
+        'install Node 22 or newer, then run the install again.'
+    );
   }
 }
 
@@ -187,13 +213,54 @@ WantedBy=default.target
   return out;
 }
 
-export function install() {
+/* Reporting "installed" because the files were written is how a service that
+ * cannot start gets called a success. It has to be running a couple of seconds
+ * later, and if it is not, the logs it already wrote are the answer. */
+async function confirmRunning() {
+  await new Promise((r) => setTimeout(r, 2500));
+
+  if (process.platform === 'linux') {
+    let state = '';
+    try {
+      state = run('systemctl', ['--user', 'is-active', 'evterm.service']);
+    } catch (err) {
+      state = String(err.stdout || '').trim() || 'inactive';
+    }
+    if (state === 'active') return [];
+    let log = '';
+    try {
+      log = run('journalctl', ['--user', '-u', 'evterm', '-n', '12', '--no-pager']);
+    } catch {
+      /* no journal, no extra detail */
+    }
+    return ['', `the service is ${state}, not running. what it logged:`, log || '(nothing logged)'];
+  }
+
+  if (process.platform === 'darwin') {
+    const printed = tryRun('launchctl', ['print', `gui/${process.getuid()}/${LABEL}`]);
+    if (printed) return [];
+    let log = '';
+    try {
+      log = fs.readFileSync(LOG, 'utf8').split('\n').slice(-12).join('\n');
+    } catch {
+      /* no log yet */
+    }
+    return ['', 'the service is not loaded. what it logged:', log || '(nothing logged)'];
+  }
+
+  return [];
+}
+
+export async function install() {
   copyAgent();
-  if (process.platform === 'darwin') return installLaunchd();
-  if (process.platform === 'linux') return installSystemd();
-  throw new Error(
-    `no service installer for ${process.platform}. run \`evterm\` under your own supervisor instead.`
-  );
+  let lines;
+  if (process.platform === 'darwin') lines = installLaunchd();
+  else if (process.platform === 'linux') lines = installSystemd();
+  else
+    throw new Error(
+      `no service installer for ${process.platform}. run \`evterm\` under your own supervisor instead.`
+    );
+  return [...lines, ...(await confirmRunning())];
 }
 
 export function uninstall() {
