@@ -398,8 +398,14 @@ if (command === 'link') {
   // rather than by the server precisely so the server never holds the private
   // half.
   const identity = await generateIdentity();
-  console.log(`fingerprint  ${await fingerprint(identity.publicKey)}`);
-  console.log('the car shows this the first time it connects. they must match.\n');
+  const fp = await fingerprint(identity.publicKey);
+  console.log('');
+  console.log(`  fingerprint   ${fp}`);
+  console.log('');
+  console.log('the car shows this the first time it connects, under "Check this fingerprint".');
+  console.log('they must match. if they do not, something is between you and this machine.');
+  console.log(`you can see it again any time with: ${RUN_AS} status`);
+  console.log('');
   run(
     {
       server: flag('server', (existing && existing.server) || DEFAULT_SERVER),
