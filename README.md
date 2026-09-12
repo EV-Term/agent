@@ -51,9 +51,14 @@ than it sounds: a car drops its connection constantly.
 hands the job to the operating system instead:
 
 ```sh
-evterm link 7K4QPS
-evterm install
+npx github:EV-Term/agent link 7K4QPS
+npx github:EV-Term/agent install
 ```
+
+`npx` runs the package and puts nothing on your PATH, so `evterm` on its own is
+`command not found` unless you installed it globally. Every command below works
+the same way with `npx github:EV-Term/agent` in front of it, and the agent prints
+whichever form applies to how you started it.
 
 It copies the agent to `~/.evterm/agent` first, because the usual way in is
 `npx github:EV-Term/agent` and npm is free to delete its cache at any time. After

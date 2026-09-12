@@ -39,6 +39,17 @@ import {
   sealer,
 } from './session-crypto.js';
 
+/* How to say "run this again" in a way that actually works where you are.
+ *
+ * The documented way in is `npx github:EV-Term/agent`, which fetches the
+ * package, runs it once, and puts nothing on PATH. So every message telling
+ * someone to run `evterm status` was telling them to run a command they do not
+ * have, and the only sign of it was `command not found` right after a pairing
+ * that had otherwise worked. */
+const RUN_AS = /[/\\](?:_npx|\.npm[/\\]_npx)[/\\]/.test(fileURLToPath(import.meta.url))
+  ? 'npx github:EV-Term/agent'
+  : 'evterm';
+
 const CONFIG_DIR = path.join(os.homedir(), '.evterm');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'agent.json');
 const DEFAULT_SERVER = 'https://app.evterm.com';
@@ -191,7 +202,15 @@ function run(cfg, { code } = {}) {
       writeConfig({ ...cfg, id: msg.id, token: msg.token });
       console.log(`paired. this machine is "${cfg.label}".`);
       console.log(`credentials in ${CONFIG_FILE}`);
-      console.log('run `evterm` to keep it connected, or `evterm unlink` to undo.');
+      // Linking is one shot: it pairs and exits. Until something keeps the
+      // agent running, the car shows this machine as not connected, which is
+      // exactly what it did.
+      console.log('');
+      console.log('this machine is paired but not yet connected. keep it running with:');
+      console.log(`  ${RUN_AS} install`);
+      console.log('');
+      console.log(`or ${RUN_AS} to hold it open in this terminal until you close it.`);
+      console.log(`undo with ${RUN_AS} unlink.`);
       ws.close();
       process.exit(0);
     }
@@ -236,6 +255,22 @@ function run(cfg, { code } = {}) {
       const s = sessions.get(msg.sid);
       // Detaching, not killing: the work in tmux outlives the car losing signal.
       if (s) s.child.kill();
+    } else if (msg.t === 'kill') {
+      // The other kind of ending: stop the work, not just the view of it. There
+      // is no SSH to this machine, so without this the car can detach from a
+      // session it can never end, and something left running in tmux here has
+      // no off switch anywhere.
+      const name = safeName(msg.session, '');
+      if (!name) return;
+      try {
+        execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'pipe' });
+        send({ t: 'killed', session: name, ok: true });
+      } catch (err) {
+        // Already gone counts as done: the caller wanted it to not exist.
+        const text = String(err.stderr || err.message || '');
+        const gone = /can't find session|no server running/i.test(text);
+        send({ t: 'killed', session: name, ok: gone, msg: gone ? '' : text.trim().slice(0, 200) });
+      }
     }
   });
 
@@ -339,7 +374,7 @@ const command = argv.find((a) => !a.startsWith('--')) || 'run';
 if (command === 'link') {
   const code = argv[argv.indexOf('link') + 1];
   if (!code || code.startsWith('--')) {
-    console.error('usage: evterm link <CODE> [--server https://...] [--name "My laptop"]');
+    console.error(`usage: ${RUN_AS} link <CODE> [--server https://...] [--name "My laptop"]`);
     process.exit(1);
   }
   const existing = readConfig();
@@ -369,7 +404,7 @@ if (command === 'link') {
   const cfg = readConfig();
   if (!cfg || !cfg.token) {
     console.error('link this machine first, then install:');
-    console.error('  evterm link <CODE>');
+    console.error(`  ${RUN_AS} link <CODE>`);
     process.exit(1);
   }
   try {
@@ -383,7 +418,7 @@ if (command === 'link') {
 } else if (command === 'status') {
   const cfg = readConfig();
   if (!cfg) {
-    console.log('not linked. run: evterm link <CODE>');
+    console.log(`not linked. run: ${RUN_AS} link <CODE>`);
     process.exit(1);
   }
   console.log(`linked to ${cfg.server} as "${cfg.label}" (id ${cfg.id})`);
@@ -394,12 +429,12 @@ if (command === 'link') {
   const cfg = readConfig();
   if (!cfg || !cfg.token) {
     console.error('not linked yet. open EV Term in the car, tap Add machine, then run:');
-    console.error('  evterm link <CODE>');
+    console.error(`  ${RUN_AS} link <CODE>`);
     process.exit(1);
   }
   if (!cfg.privateKey) {
     console.error('this machine was linked before sessions were encrypted.');
-    console.error('run `evterm link <CODE>` again to generate a key pair.');
+    console.error(`run \`${RUN_AS} link <CODE>\` again to generate a key pair.`);
     process.exit(1);
   }
   if (serviceStatus().includes('loaded') || serviceStatus().includes('active')) {
