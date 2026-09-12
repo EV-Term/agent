@@ -5,11 +5,13 @@ shell on it from your car.
 
 ```bash
 npx github:EV-Term/agent link ABC123
-npx github:EV-Term/agent
+npx github:EV-Term/agent install
 ```
 
 The code comes from the app: open EV Term in the car, tap **Add machine**, and
-it shows you six characters to type here.
+it shows you six characters to type here. The second line is what keeps the
+machine reachable; without it the agent only runs while a terminal window is
+open, and `link` on its own pairs and exits.
 
 ## What it actually does
 
