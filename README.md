@@ -4,14 +4,20 @@ Connects a machine you own to [EV Term](https://evterm.com) so you can reach a
 shell on it from your car.
 
 ```bash
-npx github:EV-Term/agent link ABC123
-npx github:EV-Term/agent install
+curl -fsSL https://evterm.com/install.sh | sh -s ABC123
 ```
 
 The code comes from the app: open EV Term in the car, tap **Add machine**, and
-it shows you six characters to type here. The second line is what keeps the
-machine reachable; without it the agent only runs while a terminal window is
-open, and `link` on its own pairs and exits.
+it shows you six characters. That script checks Node and tmux and then runs the
+one command it exists to save you typing:
+
+```bash
+npx -y github:EV-Term/agent link ABC123
+```
+
+Either way, linking pairs the machine **and** installs a small background
+service, because a machine that only runs while a terminal window is open is not
+a machine you can reach from a car. Pass `--no-install` to skip that.
 
 ## What it actually does
 
@@ -53,8 +59,8 @@ than it sounds: a car drops its connection constantly.
 hands the job to the operating system instead:
 
 ```sh
-npx github:EV-Term/agent link 7K4QPS
-npx github:EV-Term/agent install
+npx -y github:EV-Term/agent link 7K4QPS     # installs the service too
+npx -y github:EV-Term/agent install          # or on its own, later
 ```
 
 `npx` runs the package and puts nothing on your PATH, so `evterm` on its own is
