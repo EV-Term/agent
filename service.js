@@ -39,10 +39,12 @@ const UNIT = path.join(UNIT_DIR, 'evterm.service');
 
 // launchd and systemd both start with a PATH that has nothing in it a
 // developer would recognise, and this agent shells out to tmux and python3.
-// Homebrew on both architectures, then the system directories.
+// Homebrew on both architectures (macOS and Linuxbrew), then the system
+// directories.
 const PATH_ENV = [
   '/opt/homebrew/bin',
   '/usr/local/bin',
+  '/home/linuxbrew/.linuxbrew/bin',
   path.join(HOME, '.local', 'bin'),
   '/usr/bin',
   '/bin',
@@ -72,6 +74,7 @@ function resolveNode() {
   const candidates = [
     '/opt/homebrew/bin/node',
     '/usr/local/bin/node',
+    '/home/linuxbrew/.linuxbrew/bin/node',
     path.join(HOME, '.local', 'bin', 'node'),
     '/usr/bin/node',
   ];
