@@ -490,7 +490,103 @@ const flag = (name, fallback) => {
 };
 const command = argv.find((a) => !a.startsWith('--')) || 'run';
 
-if (command === 'link') {
+if (command === 'setup') {
+  const existing = readConfig();
+  const server = flag('server', (existing && existing.server) || DEFAULT_SERVER);
+  const label = flag('name', os.hostname());
+  const identity = await generateIdentity();
+  const fp = await fingerprint(identity.publicKey);
+
+  let startRes;
+  try {
+    const res = await fetch(`${server}/api/pair/device-start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        label,
+        platform: `${process.platform} ${os.release()}`,
+        publicKey: identity.publicKey,
+      }),
+    });
+    startRes = await res.json();
+    if (!res.ok || !startRes?.code || !startRes?.pollToken) {
+      throw new Error(startRes?.error || 'Failed to start pairing');
+    }
+  } catch (err) {
+    console.error(`Could not reach ${server}: ${err.message}`);
+    process.exit(1);
+  }
+
+  const { code, pollToken } = startRes;
+  const pairUrl = `${server}/link?pair=${code}`;
+
+  console.log('');
+  console.log('  \x1b[1mEV Term Setup\x1b[0m');
+  console.log('');
+  console.log('  1. Open this link on your phone, laptop, or car:');
+  console.log(`     \x1b[36m\x1b[4m${pairUrl}\x1b[0m`);
+  console.log('');
+  console.log(`  2. Machine:     \x1b[1m${label}\x1b[0m`);
+  console.log(`     PIN Code:    \x1b[1m${code}\x1b[0m`);
+  console.log(`     Fingerprint: ${fp}`);
+  console.log('');
+  console.log('  Waiting for approval in browser... (ctrl-c to cancel)');
+
+  let approved = null;
+  while (!approved) {
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      const pollRes = await fetch(`${server}/api/pair/device-poll`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pollToken }),
+      });
+      const data = await pollRes.json().catch(() => ({}));
+      if (data.status === 'ok') {
+        approved = data;
+        break;
+      }
+      if (data.status === 'expired') {
+        console.error('\nPairing session expired. Run setup again.');
+        process.exit(1);
+      }
+    } catch {
+      // Network hiccup, retry
+    }
+  }
+
+  console.log('\n  \x1b[32mApproved!\x1b[0m Linking machine...');
+  const newConfig = {
+    server,
+    label,
+    id: approved.agentId,
+    token: approved.token,
+    authorizedKeys: approved.allowKey ? [approved.allowKey] : [],
+    publicKey: identity.publicKey,
+    privateKey: identity.privateKey,
+  };
+  writeConfig(newConfig);
+
+  console.log(`  Credentials saved to ${CONFIG_FILE}`);
+
+  if (argv.includes('--no-install')) {
+    console.log(`\n  Setup complete. Start anytime with: ${RUN_AS}`);
+    process.exit(0);
+  }
+
+  try {
+    console.log('  Installing background service...');
+    const lines = await install();
+    console.log('');
+    for (const line of lines) console.log(`  ${line}`);
+    console.log(`\n  \x1b[32mReady!\x1b[0m This machine is now linked to your EV Term account.`);
+    process.exit(0);
+  } catch (err) {
+    console.error(`\n  Paired, but could not install service: ${err.message}`);
+    console.error(`  Run "${RUN_AS}" to run in this terminal instead.`);
+    process.exit(1);
+  }
+} else if (command === 'link') {
   const code = argv[argv.indexOf('link') + 1];
   if (!code || code.startsWith('--')) {
     console.error(`usage: ${RUN_AS} link <CODE> [--server https://...] [--name "My laptop"]`);
@@ -527,8 +623,38 @@ if (command === 'link') {
 } else if (command === 'authorize' || command === 'deauthorize') {
   const cfg = readConfig();
   if (!cfg?.token) { console.error('Link this machine first.'); process.exit(1); }
-  const key = argv[argv.indexOf(command) + 1];
-  try { await validateBrowserKey(key); } catch { console.error('Copy the complete browser authorization command from EV Term.'); process.exit(1); }
+  const arg = argv[argv.indexOf(command) + 1];
+  if (!arg || arg.startsWith('--')) {
+    console.error(`usage: ${RUN_AS} ${command} <CODE or PUBLIC-KEY>`);
+    process.exit(1);
+  }
+  let key = arg;
+  const pinNorm = key.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (command === 'authorize' && pinNorm.length === 8) {
+    const server = cfg.server || DEFAULT_SERVER;
+    try {
+      const res = await fetch(`${server}/api/auth-code/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: pinNorm }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok || !data?.publicKey) {
+        console.error(`Could not resolve authorization PIN "${key}": ${data?.error || 'Invalid or expired PIN'}`);
+        process.exit(1);
+      }
+      key = data.publicKey;
+      console.log('PIN verified.');
+    } catch (err) {
+      console.error(`Failed to connect to ${server}: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  try { await validateBrowserKey(key); } catch {
+    console.error('Invalid browser key or authorization PIN.');
+    process.exit(1);
+  }
   const keys = new Set(cfg.authorizedKeys || []);
   if (command === 'authorize') keys.add(key); else keys.delete(key);
   if (keys.size > 32) { console.error('Remove an old browser before authorizing another.'); process.exit(1); }
@@ -574,7 +700,10 @@ if (command === 'link') {
 } else {
   const cfg = readConfig();
   if (!cfg || !cfg.token) {
-    console.error('not linked yet. open EV Term in the car, tap Add machine, then run:');
+    console.error('not linked yet. To pair this machine with EV Term, run:');
+    console.error(`  ${RUN_AS} setup`);
+    console.error('');
+    console.error('Or link with a code:');
     console.error(`  ${RUN_AS} link <CODE>`);
     process.exit(1);
   }
