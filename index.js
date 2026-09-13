@@ -250,9 +250,10 @@ function run(cfg, opts = {}) {
     }
 
     if (msg.t === 'open') {
-      handleOpen(msg, send, cfg).catch((err) =>
-        send({ t: 'status', sid: msg.sid, s: 'error', msg: err.message, final: true })
-      );
+      handleOpen(msg, send, cfg).catch((err) => {
+        console.error(`[agent] handleOpen error: ${err.message}`, err);
+        send({ t: 'status', sid: msg.sid, s: 'error', msg: err.message, final: true });
+      });
     } else if (msg.t === 'data') {
       const s = sessions.get(msg.sid);
       if (!s) return;
