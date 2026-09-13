@@ -200,7 +200,8 @@ WantedBy=default.target
   );
 
   run('systemctl', ['--user', 'daemon-reload']);
-  run('systemctl', ['--user', 'enable', '--now', 'evterm.service']);
+  run('systemctl', ['--user', 'enable', 'evterm.service']);
+  run('systemctl', ['--user', 'restart', 'evterm.service']);
 
   const out = [
     'installed as a systemd user service. it starts at boot and restarts if it dies.',
